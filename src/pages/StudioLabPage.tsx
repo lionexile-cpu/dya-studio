@@ -582,13 +582,16 @@ function ProfileBindingPanel() {
 
 export function StudioLabPage() {
   return (
-    <div className="space-y-4 p-4">
-      <DtsiImportPanel />
-      <BatteryForecastPanel />
-      <ReconnectPanel />
-      <LayoutSuggestionPanel />
-      <AutoSnapshotPanel />
-      <ProfileBindingPanel />
+    // The tab container is overflow-hidden; like the other pages, scroll here.
+    <div className="h-full overflow-auto p-4">
+      <div className="space-y-4">
+        <DtsiImportPanel />
+        <BatteryForecastPanel />
+        <ReconnectPanel />
+        <LayoutSuggestionPanel />
+        <AutoSnapshotPanel />
+        <ProfileBindingPanel />
+      </div>
     </div>
   );
 }

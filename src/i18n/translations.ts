@@ -20,6 +20,8 @@ const ja: Record<string, string> = {
   BLE: "BLE",
   Settings: "設定",
   Troubleshooting: "トラブルシューティング",
+  Firmware: "ファームウェア",
+  "Firmware update": "ファームウェア更新",
   Subsystems: "サブシステム",
   Connected: "接続中",
   Disconnect: "切断",

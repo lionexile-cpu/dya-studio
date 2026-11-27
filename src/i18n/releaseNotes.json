@@ -5,7 +5,12 @@
       "date": null,
       "changes": {
         "major": [],
-        "minor": [],
+        "minor": [
+          {
+            "en": "Firmware update page: flash a .uf2 (or a GitHub Actions artifact .zip) over USB serial without USB mass storage, or build a DFU package for Bluetooth OTA from a phone app. Works with the OTA/Serial Update Mode behaviors of zmk-feature-ota-dfu.",
+            "ja": "ファームウェア更新ページを追加。USB マスストレージを使わずに USB シリアルで .uf2 (または GitHub Actions の成果物 .zip) を書き込めるほか、スマホアプリで Bluetooth OTA 更新するための DFU パッケージも作れます。zmk-feature-ota-dfu の OTA / Serial Update Mode ビヘイビアと組み合わせて使います。"
+          }
+        ],
         "patch": []
       }
     },

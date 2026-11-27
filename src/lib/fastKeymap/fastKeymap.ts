@@ -26,7 +26,12 @@ import { FK_DEFINITION_VERSION, bundledByDefFp } from "./standardBehaviors";
  * behavior_ids` must fit `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128`, so the
  * firmware bounds it to `max_count:32` -- chunk any larger miss set into
  * multiple `get_behaviors` round-trips of at most this many ids each. */
-const GET_BEHAVIORS_CHUNK_SIZE = 32;
+const GET_BEHAVIORS_CHUNK_SIZE = 8;
+// Requests may carry up to 32 ids, but the *response* (display names +
+// parameter metadata for every id) can outgrow the firmware's RPC TX path once
+// a keyboard has many custom behaviors, which made the whole background load
+// fail and left every key labelled "—". Smaller batches keep each response
+// small; a failing batch is retried id by id (see fetchMissingBehaviors).
 
 /** Batch size for `get_layers` (DESIGN.md SS7): `GetLayersRequest.layer_ids`
  * is bounded `max_count:32` on the firmware for the same RX-buffer reason as
@@ -454,6 +459,12 @@ function isSerializedBehavior(value: unknown): value is SerializedBehavior {
   );
 }
 
+/** A cached entry with neither an alias nor a display name is a placeholder
+ * left by a failed fetch (older builds cached those); never serve it. */
+function isUsableCachedBehavior(value: unknown): value is SerializedBehavior {
+  return isSerializedBehavior(value) && (value.alias !== "" || value.displayName !== "");
+}
+
 function serializeBehavior(behavior: FastKeymapBehavior): SerializedBehavior {
   return {
     localId: behavior.localId,
@@ -518,7 +529,7 @@ function readWholeSetBehaviorCache(
     behaviors: unknown[];
   }>(storage, FastKeymapCacheKeys.behaviors(deviceKey));
   if (!cached) return null;
-  const cachedBehaviors = (cached.behaviors ?? []).filter(isSerializedBehavior);
+  const cachedBehaviors = (cached.behaviors ?? []).filter(isUsableCachedBehavior);
   // An old-shaped cache (no entries survive the filter, even though `cached`
   // itself is truthy) is treated as absent, not a match.
   if (
@@ -557,7 +568,7 @@ async function loadBehaviors(
     behaviors: unknown[];
   }>(storage, cacheKey);
   const cachedBehaviors = (cached?.behaviors ?? []).filter(
-    isSerializedBehavior,
+    isUsableCachedBehavior,
   );
 
   // Whole-set fast path: behaviors_fp matches the last load's -> every
@@ -602,9 +613,24 @@ async function loadBehaviors(
       ? BehaviorDetailsMode.BEHAVIOR_DETAILS_CUSTOM
       : BehaviorDetailsMode.BEHAVIOR_DETAILS_NONE;
 
-  const listResponse = await callChecked(call, {
-    listBehaviors: { details: mode, includeAlias, excludeDisplayName },
-  });
+  let listResponse: Response;
+  try {
+    listResponse = await callChecked(call, {
+      listBehaviors: { details: mode, includeAlias, excludeDisplayName },
+    });
+  } catch (err) {
+    if (mode === BehaviorDetailsMode.BEHAVIOR_DETAILS_NONE) throw err;
+    // Inlining details for every (custom) behavior makes one large response;
+    // fall back to slim summaries and resolve misses in small batches below.
+    console.warn("list_behaviors with details failed; retrying slim", err);
+    listResponse = await callChecked(call, {
+      listBehaviors: {
+        details: BehaviorDetailsMode.BEHAVIOR_DETAILS_NONE,
+        includeAlias,
+        excludeDisplayName,
+      },
+    });
+  }
   const summaries = listResponse.listBehaviors?.behaviors ?? [];
 
   const behaviors: FastKeymapBehavior[] = new Array(summaries.length);
@@ -659,25 +685,52 @@ async function loadBehaviors(
   // behavior in as few get_behaviors round-trips as fit the request buffer
   // (chunked at GET_BEHAVIORS_CHUNK_SIZE).
   const missLocalIds = [...missIndexByLocalId.keys()];
-  for (const idsChunk of chunk(missLocalIds, GET_BEHAVIORS_CHUNK_SIZE)) {
-    const batchResponse = await callChecked(call, {
-      getBehaviors: { behaviorIds: idsChunk, includeAlias, excludeDisplayName },
-    });
-    for (const entry of batchResponse.getBehaviors?.behaviors ?? []) {
+  const applyEntries = (response: Response) => {
+    for (const entry of response.getBehaviors?.behaviors ?? []) {
       const index = missIndexByLocalId.get(entry.id);
       if (index === undefined || !entry.details) continue;
       fetchedCount++;
       const summary = summaries[index];
       behaviors[index] = resolveInline(summary, entry.details);
     }
+  };
+  for (const idsChunk of chunk(missLocalIds, GET_BEHAVIORS_CHUNK_SIZE)) {
+    try {
+      applyEntries(
+        await callChecked(call, {
+          getBehaviors: { behaviorIds: idsChunk, includeAlias, excludeDisplayName },
+        }),
+      );
+    } catch (batchErr) {
+      if (idsChunk.length === 1) {
+        console.warn(`get_behaviors(${idsChunk[0]}) failed`, batchErr);
+        continue;
+      }
+      // One oversized/broken entry must not take the whole batch (and with it
+      // every key label) down: retry the ids one at a time.
+      console.warn("get_behaviors batch failed; retrying one by one", batchErr);
+      for (const id of idsChunk) {
+        try {
+          applyEntries(
+            await callChecked(call, {
+              getBehaviors: { behaviorIds: [id], includeAlias, excludeDisplayName },
+            }),
+          );
+        } catch (err) {
+          console.warn(`get_behaviors(${id}) failed`, err);
+        }
+      }
+    }
   }
 
   // Any local_id the device didn't answer for (shouldn't normally happen)
   // still needs a slot -- fall back to the slim summary's own fields so the
   // model stays fully populated rather than sparse.
+  let unresolvedCount = 0;
   for (const [localId, index] of missIndexByLocalId) {
     if (behaviors[index]) continue;
     const summary = summaries[index];
+    unresolvedCount++;
     fetchedCount++;
     behaviors[index] = {
       localId,
@@ -689,11 +742,15 @@ async function loadBehaviors(
     };
   }
 
-  writeCache(storage, cacheKey, {
-    fp: snapshot.behaviorsFp,
-    defFpBits: servedBits,
-    behaviors: behaviors.map(serializeBehavior),
-  });
+  // Never cache a partially resolved list: the placeholders would otherwise be
+  // served from the warm cache forever (same behaviors_fp) as blank labels.
+  if (unresolvedCount === 0) {
+    writeCache(storage, cacheKey, {
+      fp: snapshot.behaviorsFp,
+      defFpBits: servedBits,
+      behaviors: behaviors.map(serializeBehavior),
+    });
+  }
 
   return {
     behaviors,

@@ -39,6 +39,16 @@ import {
   type SettingScalarValue,
   type SettingValue,
 } from "../proto/cormoran/zmk/custom_settings/custom_settings";
+import {
+  RUNTIME_HOLD_TAP_FIELDS,
+  RUNTIME_HOLD_TAP_IDENTIFIER,
+  RUNTIME_HOLD_TAP_SECTION_DESCRIPTION,
+  RUNTIME_HOLD_TAP_SECTION_TITLE,
+  groupRuntimeHoldTapSettings,
+  parseRuntimeHoldTapKey,
+  runtimeHoldTapField,
+  runtimeHoldTapFlavorOptionLabel,
+} from "../lib/runtimeHoldTapSettings";
 
 type ValueKind = "bytes" | "int32" | "bool" | "string" | "behavior" | "unknown";
 
@@ -227,6 +237,12 @@ const SECTION_DESCRIPTIONS: Record<string, BilingualText> = {
     en: "Detection and manual override of the operating system the keyboard is connected to.",
     ja: "接続先OSの自動判定と手動上書きに関する設定です。",
   },
+  [RUNTIME_HOLD_TAP_IDENTIFIER]: RUNTIME_HOLD_TAP_SECTION_DESCRIPTION,
+};
+
+// Human-readable section titles, shown before the raw subsystem identifier.
+const SECTION_TITLES: Record<string, BilingualText> = {
+  [RUNTIME_HOLD_TAP_IDENTIFIER]: RUNTIME_HOLD_TAP_SECTION_TITLE,
 };
 
 // Field descriptions that only make sense in the context of one subsystem
@@ -274,6 +290,9 @@ const SUBSYSTEM_FIELD_DESCRIPTIONS: Record<
       ja: "他のレイヤーが有効になっていないときに使う基本レイヤーです。",
     },
   },
+  [RUNTIME_HOLD_TAP_IDENTIFIER]: Object.fromEntries(
+    RUNTIME_HOLD_TAP_FIELDS.map((entry) => [entry.field, entry.description]),
+  ),
 };
 
 const KNOWN_FIELD_DESCRIPTIONS: Record<string, BilingualText> = {
@@ -904,6 +923,8 @@ interface SettingEditorProps {
   layers: { id: number; name: string }[];
   behaviors: Map<number, BehaviorDefinition>;
   onChange: (value: SettingValue) => void;
+  // Optional display text for option labels reported by the firmware.
+  formatOptionLabel?: (label: string) => string;
 }
 
 function SettingEditor({
@@ -911,6 +932,7 @@ function SettingEditor({
   layers,
   behaviors,
   onChange,
+  formatOptionLabel,
 }: SettingEditorProps) {
   const { t } = useLanguage();
   const kind = valueKind(setting);
@@ -991,7 +1013,10 @@ function SettingEditor({
             key={`${scalarOptionValue(value)}:${index}`}
             value={scalarOptionValue(value)}
           >
-            {options.labels[index] || scalarOptionValue(value)}
+            {options.labels[index]
+              ? (formatOptionLabel?.(options.labels[index]) ??
+                options.labels[index])
+              : scalarOptionValue(value)}
           </option>
         ))}
       </select>
@@ -1208,18 +1233,23 @@ function DefaultValueHint({
 
 interface SettingRowProps {
   setting: Setting;
+  // Display name; the raw key is shown when omitted (and as a tooltip otherwise).
+  label?: string;
   description?: string;
   layers: { id: number; name: string }[];
   behaviors: Map<number, BehaviorDefinition>;
   onWrite: (setting: Setting, value: SettingValue) => Promise<void>;
+  formatOptionLabel?: (label: string) => string;
 }
 
 function SettingRow({
   setting,
+  label,
   description,
   layers,
   behaviors,
   onWrite,
+  formatOptionLabel,
 }: SettingRowProps) {
   const [saveState, setSaveState] = useState<"idle" | "queued" | "saving">(
     "idle",
@@ -1274,8 +1304,11 @@ function SettingRow({
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <p className="truncate text-sm font-medium text-[var(--color-text)]">
-            {settingLabel(setting)}
+          <p
+            className="truncate text-sm font-medium text-[var(--color-text)]"
+            title={label ? settingLabel(setting) : undefined}
+          >
+            {label ?? settingLabel(setting)}
           </p>
           <RowStatusIndicator saveState={saveState} editStatus={editStatus} />
         </div>
@@ -1292,6 +1325,7 @@ function SettingRow({
           layers={layers}
           behaviors={behaviors}
           onChange={queueMemoryWrite}
+          formatOptionLabel={formatOptionLabel}
         />
         {showDefaultHint && (
           <DefaultValueHint
@@ -1324,6 +1358,9 @@ interface SettingRowListProps {
   // Fallback used when describeField yields nothing for a setting (generic
   // description derived from key/type; see resolveSettingDescription).
   describeSetting?: (setting: Setting) => string | undefined;
+  // Optional readable row label (defaults to the raw setting key).
+  labelSetting?: (setting: Setting) => string | undefined;
+  formatOptionLabel?: (label: string) => string;
 }
 
 function SettingRowList({
@@ -1333,6 +1370,8 @@ function SettingRowList({
   customSettings,
   describeField,
   describeSetting,
+  labelSetting,
+  formatOptionLabel,
 }: SettingRowListProps) {
   return (
     <>
@@ -1345,6 +1384,7 @@ function SettingRowList({
             setting.value?.arrayValue?.index ?? "scalar",
           ].join(":")}
           setting={setting}
+          label={labelSetting?.(setting)}
           description={
             describeField?.(fieldName(setting.key)) ??
             describeSetting?.(setting)
@@ -1352,6 +1392,7 @@ function SettingRowList({
           layers={layers}
           behaviors={behaviors}
           onWrite={customSettings.writeSettingToMemory}
+          formatOptionLabel={formatOptionLabel}
         />
       ))}
     </>
@@ -1398,9 +1439,17 @@ export function CustomSettingsSectionCard({
     .sort((a, b) => settingSortValue(a).localeCompare(settingSortValue(b)));
 
   const isPmw3610 = section.identifier === PMW3610_CUSTOM_SETTINGS_IDENTIFIER;
-  const groups = isPmw3610
+  const isRuntimeHoldTap = section.identifier === RUNTIME_HOLD_TAP_IDENTIFIER;
+  const groups: Array<{
+    key: string;
+    title: string;
+    description?: string;
+    settings: Setting[];
+  }> | null = isPmw3610
     ? PMW3610_SETTING_GROUPS.map((group) => ({
-        ...group,
+        key: group.title,
+        title: t(group.title),
+        description: t(group.description),
         settings: sortedSettings
           .filter((setting) => group.fields.includes(fieldName(setting.key)))
           .sort(
@@ -1409,13 +1458,33 @@ export function CustomSettingsSectionCard({
               group.fields.indexOf(fieldName(b.key)),
           ),
       })).filter((group) => group.settings.length > 0)
-    : null;
+    : isRuntimeHoldTap
+      ? // One group per hold-tap behavior ("<field>@<display-name>").
+        groupRuntimeHoldTapSettings(sortedSettings).map((group) => ({
+          key: group.instance,
+          title: group.instance || section.identifier,
+          settings: group.settings,
+        }))
+      : null;
   const groupedKeys = new Set(groups?.flatMap((group) => group.settings));
   const ungroupedSettings = groups
     ? sortedSettings.filter((setting) => !groupedKeys.has(setting))
     : sortedSettings;
 
   const sectionDescription = SECTION_DESCRIPTIONS[section.identifier];
+  const sectionTitle = SECTION_TITLES[section.identifier];
+  // Readable row labels / option labels for subsystems that provide them.
+  const labelSetting = isRuntimeHoldTap
+    ? (setting: Setting) => {
+        const field = runtimeHoldTapField(
+          parseRuntimeHoldTapKey(setting.key).field,
+        );
+        return field ? pickText(field.label, language) : undefined;
+      }
+    : undefined;
+  const formatOptionLabel = isRuntimeHoldTap
+    ? (label: string) => runtimeHoldTapFlavorOptionLabel(label, language)
+    : undefined;
 
   return (
     <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -1439,7 +1508,16 @@ export function CustomSettingsSectionCard({
           )}
           <div className="min-w-0">
             <h4 className="truncate text-sm font-medium text-[var(--color-text)]">
-              {section.identifier}
+              {sectionTitle ? (
+                <>
+                  {pickText(sectionTitle, language)}{" "}
+                  <span className="text-xs font-normal text-[var(--color-text-muted)]">
+                    ({section.identifier})
+                  </span>
+                </>
+              ) : (
+                section.identifier
+              )}
             </h4>
             {sectionDescription && (
               <p className="text-[11px] leading-snug text-[var(--color-text-muted)]">
@@ -1553,14 +1631,16 @@ export function CustomSettingsSectionCard({
           )}
 
           {groups?.map((group) => (
-            <div key={group.title} className="mt-4 first:mt-2">
+            <div key={group.key} className="mt-4 first:mt-2">
               <div className="pb-1">
                 <h5 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-electric)]">
-                  {t(group.title)}
+                  {group.title}
                 </h5>
-                <p className="text-[11px] text-[var(--color-text-muted)]">
-                  {t(group.description)}
-                </p>
+                {group.description && (
+                  <p className="text-[11px] text-[var(--color-text-muted)]">
+                    {group.description}
+                  </p>
+                )}
               </div>
               <div className="border-l-2 border-[var(--color-border)] pl-4">
                 <SettingRowList
@@ -1569,9 +1649,13 @@ export function CustomSettingsSectionCard({
                   behaviors={behaviors}
                   customSettings={customSettings}
                   describeField={(field) => {
-                    const description = PMW3610_FIELD_DESCRIPTIONS[field];
+                    const description = isPmw3610
+                      ? PMW3610_FIELD_DESCRIPTIONS[field]
+                      : undefined;
                     return description ? t(description) : undefined;
                   }}
+                  labelSetting={labelSetting}
+                  formatOptionLabel={formatOptionLabel}
                   describeSetting={(setting) =>
                     resolveSettingDescription(
                       setting,

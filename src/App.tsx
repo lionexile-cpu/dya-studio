@@ -2,6 +2,7 @@ import { useContext, useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   IconChartBar,
+  IconCpu,
   IconCloudUpload,
   IconFlask,
   IconHome,
@@ -16,6 +17,11 @@ import {
 
 import { SplashScreen } from "./components/SplashScreen";
 import { ReleaseNotesPage, RELEASE_NOTES_PATH } from "./pages/ReleaseNotesPage";
+import {
+  FirmwareUpdatePage,
+  FIRMWARE_UPDATE_PATH,
+} from "./pages/FirmwareUpdatePage";
+import { FirmwareUpdateLauncher } from "./components/FirmwareUpdateLauncher";
 import { ReconnectingOverlay } from "./components/ReconnectingOverlay";
 import {
   DeviceConnectionProvider,
@@ -111,6 +117,15 @@ function getTabs(t: (key: string) => string): TabItem[] {
       icon: <IconStethoscope size={18} />,
       content: <TroubleshootingPage />,
     },
+    // ファームウェア更新: 更新モードに入るとキーボードが再起動して接続が切れるため、
+    // 実際の書き込みは接続不要の独立ルート (/firmware-update) で行う。
+    // タブはその入口と説明だけを置く。
+    {
+      id: "firmware",
+      label: t("Firmware"),
+      icon: <IconCpu size={18} />,
+      content: <FirmwareUpdateLauncher />,
+    },
     {
       id: "subsystems",
       label: t("Subsystems"),
@@ -180,6 +195,7 @@ function AppContent() {
   }, []);
   const onReleaseNotes = pathname === RELEASE_NOTES_PATH;
   const onOauthCallback = pathname === OAUTH_CALLBACK_PATH;
+  const onFirmwareUpdate = pathname === FIRMWARE_UPDATE_PATH;
 
   useEffect(() => {
     // Canonicalize unknown paths (e.g. a stale/typo'd link) to the home tab,
@@ -189,12 +205,13 @@ function AppContent() {
     if (
       !onReleaseNotes &&
       !onOauthCallback &&
+      !onFirmwareUpdate &&
       urlTab !== activeTab &&
       window.location.pathname !== "/"
     ) {
       window.history.replaceState(null, "", "/");
     }
-  }, [urlTab, activeTab, onReleaseNotes, onOauthCallback]);
+  }, [urlTab, activeTab, onReleaseNotes, onOauthCallback, onFirmwareUpdate]);
 
   const setActiveTabWithTracking = useCallback(
     (tabId: string) => {
@@ -221,6 +238,12 @@ function AppContent() {
     return <ReleaseNotesPage onBack={() => navigatePath("/")} />;
   }
 
+  // Firmware update works without (and survives losing) the Studio
+  // connection: the keyboard reboots into its bootloader during an update.
+  if (onFirmwareUpdate) {
+    return <FirmwareUpdatePage onBack={() => navigatePath("/")} />;
+  }
+
   return (
     <>
       <AnimatePresence>
@@ -242,6 +265,7 @@ function AppContent() {
                 isConnecting={connection.isLoading}
                 error={connection.error}
                 onShowReleaseNotes={() => navigatePath(RELEASE_NOTES_PATH)}
+                onShowFirmwareUpdate={() => navigatePath(FIRMWARE_UPDATE_PATH)}
               />
             </motion.div>
           )
